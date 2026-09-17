@@ -1,32 +1,15 @@
-# ns-3 build output
 build/
 cmake-cache/
 .cache/
 *.o
 *.a
 *.so
-
-# Generated simulation output
 *.pcap
 *.tr
 *.xml
-*.csv
-*.txt
-
-# IDE and editor files
+__pycache__/
+*.pyc
 .vscode/
 .idea/
 *.swp
 *~
-
-# Python cache
-__pycache__/
-*.pyc
-
-# OS files
-.DS_Store
-Thumbs.db
-
-# Temporary files
-tmp/
-temp/
