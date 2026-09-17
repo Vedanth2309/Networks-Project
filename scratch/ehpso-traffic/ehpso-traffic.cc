@@ -16,45 +16,19 @@
 
 using namespace ns3;
 
-static void
-UpdateTrafficDemand(
-    Ptr<TrafficApplication> application,
-    double demandMbps)
-{
-    application->SetDemand(
-        demandMbps);
+static void UpdateTrafficDemand(Ptr<TrafficApplication> application, double demandMbps) {
+    application->SetDemand(demandMbps);
 }
 
-int
-main(int argc, char* argv[])
-{
-    /*
-     * =========================================
-     * CONFIGURATION
-     * =========================================
-     */
-
+int main(int argc, char* argv[]) {
     uint32_t numberOfSources = 6;
-
     double bottleneckRateMbps = 5.0;
-
     double simulationTime = 20.0;
-
     double profileInterval = 1.0;
-
     double controlInterval = 1.0;
-
     uint32_t packetSize = 1024;
-
     uint32_t seed = 12345;
-
     bool useEho = true;
-
-    /*
-     * =========================================
-     * COMMAND LINE
-     * =========================================
-     */
 
     CommandLine cmd(__FILE__);
 
@@ -84,12 +58,6 @@ main(int argc, char* argv[])
         useEho);
 
     cmd.Parse(argc, argv);
-
-    /*
-     * =========================================
-     * CONFIGURATION OUTPUT
-     * =========================================
-     */
 
     std::cout
         << "\n========================================\n"
@@ -133,12 +101,6 @@ main(int argc, char* argv[])
                 : "WITHOUT EHPSO")
         << "\n";
 
-    /*
-     * =========================================
-     * TRAFFIC GENERATOR
-     * =========================================
-     */
-
     TrafficGenerator generator(
         numberOfSources,
         packetSize,
@@ -148,126 +110,54 @@ main(int argc, char* argv[])
         profileInterval,
         seed);
 
-    std::vector<
-        TrafficGenerator::TrafficSource>
-        traffic =
-            generator.GenerateTraffic();
+    std::vector<TrafficGenerator::TrafficSource> traffic = generator.GenerateTraffic();
 
-    generator.PrintTraffic(
-        traffic);
+    generator.PrintTraffic(traffic);
 
-    /*
-     * =========================================
-     * NETWORK
-     * =========================================
-     */
-
-    NetworkScenario network(
-        numberOfSources,
-        bottleneckRateMbps,
-        "10ms");
+    NetworkScenario network(numberOfSources, bottleneckRateMbps, "10ms");
 
     network.CreateNetwork();
-
     network.InstallInternet();
-
     network.AssignAddresses();
 
-    NodeContainer sourceNodes =
-        network.GetSourceNodes();
-
-    Ptr<Node> server =
-        network.GetServerNode();
-
-    Ipv4Address serverAddress =
-        network.GetServerAddress();
-
-    /*
-     * =========================================
-     * RECEIVER
-     * =========================================
-     */
+    NodeContainer sourceNodes = network.GetSourceNodes();
+    Ptr<Node> server = network.GetServerNode();
+    Ipv4Address serverAddress = network.GetServerAddress();
 
     const uint16_t port = 9000;
-
-    Ptr<TrafficReceiver> receiver =
-        CreateObject<TrafficReceiver>();
+    Ptr<TrafficReceiver> receiver = CreateObject<TrafficReceiver>();
 
     receiver->Setup(port);
+    server->AddApplication(receiver);
 
-    server->AddApplication(
-        receiver);
+    receiver->SetStartTime(Seconds(0.0));
 
-    receiver->SetStartTime(
-        Seconds(0.0));
+    receiver->SetStopTime(Seconds(simulationTime));
 
-    receiver->SetStopTime(
-        Seconds(simulationTime));
+    std::vector<Ptr<TrafficApplication>> applications;
 
-    /*
-     * =========================================
-     * TRAFFIC APPLICATIONS
-     * =========================================
-     */
+    for (uint32_t i = 0; i < numberOfSources; ++i) {
+        Ptr<TrafficApplication> application = CreateObject<TrafficApplication>();
 
-    std::vector<
-        Ptr<TrafficApplication>>
-        applications;
+        double initialDemand = traffic[i].profile.front().demandMbps;
 
-    for (uint32_t i = 0;
-         i < numberOfSources;
-         ++i)
-    {
-        Ptr<TrafficApplication>
-            application =
-                CreateObject<
-                    TrafficApplication>();
+        application->Setup(initialDemand, traffic[i].packetSize, serverAddress, port);
 
-        double initialDemand =
-            traffic[i]
-                .profile
-                .front()
-                .demandMbps;
+        sourceNodes.Get(i)->AddApplication(application);
 
-        application->Setup(
-            initialDemand,
-            traffic[i].packetSize,
-            serverAddress,
-            port);
+        application->SetStartTime(Seconds(traffic[i].startTime));
 
-        sourceNodes.Get(i)
-            ->AddApplication(
-                application);
+        application->SetStopTime(Seconds(traffic[i].stopTime));
 
-        application->SetStartTime(
-            Seconds(
-                traffic[i].startTime));
+        applications.push_back(application);
 
-        application->SetStopTime(
-            Seconds(
-                traffic[i].stopTime));
-
-        applications.push_back(
-            application);
-
-        /*
-         * =====================================
-         * DYNAMIC TRAFFIC
-         * =====================================
-         */
-
-        for (const auto& point :
-             traffic[i].profile)
-        {
+        for (const auto& point : traffic[i].profile) {
             if (point.time <=
-                traffic[i].startTime)
-            {
+                traffic[i].startTime) {
                 continue;
             }
 
-            if (point.time >=
-                traffic[i].stopTime)
-            {
+            if (point.time >= traffic[i].stopTime) {
                 continue;
             }
 
@@ -279,61 +169,33 @@ main(int argc, char* argv[])
         }
     }
 
-    /*
-     * =========================================
-     * TRAFFIC MONITOR
-     * =========================================
-     */
+    TrafficMonitor monitor(applications, PeekPointer(receiver), bottleneckRateMbps);
 
-    TrafficMonitor monitor(
-        applications,
-        PeekPointer(receiver),
-        bottleneckRateMbps);
+    std::unique_ptr<EHPSO> optimizer;
 
-    /*
-     * =========================================
-     * EHPSO / BASELINE
-     * =========================================
-     */
+    std::unique_ptr<TrafficController> controller;
 
-    std::unique_ptr<EHPSO>
-        optimizer;
-
-    std::unique_ptr<
-        TrafficController>
-        controller;
-
-    if (useEho)
-    {
+    if (useEho) {
         std::cout
             << "\n========================================\n"
             << " EHPSO ENABLED\n"
             << "========================================\n";
 
-        optimizer =
-            std::make_unique<EHPSO>(
-                /*
-                 * EHO
-                 */
-                30,     // population
-                3,      // clans
-                20,     // iterations
-                0.5,    // alpha
-                0.1,    // beta
+        optimizer = std::make_unique<EHPSO>(
+                30,
+                3,
+                20,
+                0.5,
+                0.1,
 
-                /*
-                 * PSO
-                 */
-                20,     // population
-                20,     // iterations
-                0.7,    // inertia
-                1.5,    // cognitive
-                1.5,    // social
-
+                20,
+                20,
+                0.7,
+                1.5,
+                1.5,
                 seed);
 
-        controller =
-            std::make_unique<
+        controller = std::make_unique<
                 TrafficController>(
                 applications,
                 &monitor,
@@ -345,35 +207,20 @@ main(int argc, char* argv[])
 
         controller->Start();
     }
-    else
-    {
+    else {
         std::cout
             << "\n========================================\n"
             << " BASELINE - WITHOUT EHPSO\n"
             << "========================================\n";
     }
 
-    /*
-     * =========================================
-     * RUN
-     * =========================================
-     */
-
     std::cout
         << "\n========================================\n"
         << " STARTING SIMULATION\n"
         << "========================================\n";
 
-    Simulator::Stop(
-        Seconds(simulationTime));
-
+    Simulator::Stop(Seconds(simulationTime));
     Simulator::Run();
-
-    /*
-     * =========================================
-     * FINAL RESULTS
-     * =========================================
-     */
 
     std::cout
         << "\n========================================\n"
@@ -384,14 +231,7 @@ main(int argc, char* argv[])
         << "\n"
         << "========================================\n";
 
-    monitor.PrintFinalResults(
-        simulationTime);
-
-    /*
-     * =========================================
-     * CLEANUP
-     * =========================================
-     */
+    monitor.PrintFinalResults(simulationTime);
 
     Simulator::Destroy();
 
