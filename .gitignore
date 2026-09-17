@@ -1,52 +1,32 @@
-*.diff
-*.orig
-*.patch
-*.rej
-
+# ns-3 build output
+build/
+cmake-cache/
+.cache/
 *.o
-*.pyc
-*.pyo
+*.a
+*.so
 
-*.cwnd
-*.dat
-*.log
-*.mob
+# Generated simulation output
 *.pcap
-*.plt
-*.routes
 *.tr
-[D|U]l[A-Z][a-z]*Stats.txt
+*.xml
+*.csv
+*.txt
 
-\#*#
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
 *~
 
-testpy-output
+# Python cache
+__pycache__/
+*.pyc
 
-bindings/python/pybindgen/
+# OS files
+.DS_Store
+Thumbs.db
 
-venv/
-
-ms_print.*
-massif.*
-coverity
-TAGS
-
-.lock-ns3_*
-.ns3rc
-
-build-dir/
-build/
-/.cproject
-/.project
-
-version.cache
-
-.gitlab-ci-local/
-.idea/
-cmake-*/
-vcpkg/
-
-.vs/
-
-# Ignore local cache used by e.g. clangd
-.cache/
+# Temporary files
+tmp/
+temp/
