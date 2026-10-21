@@ -1,249 +1,89 @@
 #include "network-scenario.h"
 
-#include <sstream>
+#include "ns3/ipv4-global-routing-helper.h"
+#include "ns3/ipv4-address-helper.h"
+#include "ns3/string.h"
+#include "ns3/data-rate.h"
+
+#include <stdexcept>
 
 using namespace ns3;
 
-NetworkScenario::NetworkScenario(
-    uint32_t numberOfSources,
-    double bottleneckRateMbps,
-    const std::string& bottleneckDelay)
+NetworkScenario::NetworkScenario(uint32_t numberOfSources,
+                                 double bottleneck1RateMbps,
+                                 double bottleneck2RateMbps,
+                                 const std::string& bottleneckDelay)
     : m_numberOfSources(numberOfSources),
-      m_bottleneckRateMbps(bottleneckRateMbps),
+      m_bottleneck1RateMbps(bottleneck1RateMbps),
+      m_bottleneck2RateMbps(bottleneck2RateMbps),
       m_bottleneckDelay(bottleneckDelay)
 {
+    if (numberOfSources == 0 || bottleneck1RateMbps <= 0 || bottleneck2RateMbps <= 0)
+        throw std::invalid_argument("Source count and bottleneck rates must be positive.");
 }
 
-void
-NetworkScenario::CreateNetwork()
+void NetworkScenario::CreateNetwork()
 {
-    /*
-     * -----------------------------------------
-     * IoT source nodes
-     * -----------------------------------------
-     */
+    m_sourceNodes.Create(m_numberOfSources);
+    m_router1 = CreateObject<Node>();
+    m_router2 = CreateObject<Node>();
+    m_server = CreateObject<Node>();
 
-    m_sourceNodes.Create(
-        m_numberOfSources);
+    PointToPointHelper access;
+    access.SetDeviceAttribute("DataRate", StringValue("100Mbps"));
+    access.SetChannelAttribute("Delay", StringValue("1ms"));
+    for (uint32_t i = 0; i < m_numberOfSources; ++i)
+        m_accessDevices.push_back(access.Install(m_sourceNodes.Get(i), m_router1));
 
-    /*
-     * -----------------------------------------
-     * Router nodes
-     * -----------------------------------------
-     */
+    PointToPointHelper b1;
+    b1.SetDeviceAttribute("DataRate", StringValue(std::to_string(m_bottleneck1RateMbps) + "Mbps"));
+    b1.SetChannelAttribute("Delay", StringValue(m_bottleneckDelay));
+    m_bottleneck1Devices = b1.Install(m_router1, m_router2);
 
-    m_routerNodes.Create(2);
+    PointToPointHelper b2;
 
-    /*
-     * -----------------------------------------
-     * Edge server
-     * -----------------------------------------
-     */
-
-    m_serverNode.Create(1);
-
-    /*
-     * -----------------------------------------
-     * IoT → Router 0
-     * -----------------------------------------
-     */
-
-    PointToPointHelper sourceLink;
-
-    sourceLink.SetDeviceAttribute(
+    b2.SetDeviceAttribute(
         "DataRate",
-        StringValue("10Mbps"));
+        StringValue(std::to_string(m_bottleneck2RateMbps) + "Mbps"));
 
-    sourceLink.SetChannelAttribute(
+    b2.SetChannelAttribute(
         "Delay",
-        StringValue("2ms"));
+        StringValue("5ms"));
 
-    /*
-     * -----------------------------------------
-     * Router 0 → Router 1 bottleneck
-     * -----------------------------------------
-     */
+    b2.SetQueue(
+        "ns3::DropTailQueue<Packet>",
+        "MaxSize",
+        QueueSizeValue(QueueSize("5p")));
 
-    PointToPointHelper bottleneckLink;
-
-    bottleneckLink.SetDeviceAttribute(
-        "DataRate",
-        StringValue(
-            std::to_string(
-                m_bottleneckRateMbps) +
-            "Mbps"));
-
-    bottleneckLink.SetChannelAttribute(
-        "Delay",
-        StringValue(
-            m_bottleneckDelay));
-
-    /*
-     * -----------------------------------------
-     * Router 1 → Edge Server
-     * -----------------------------------------
-     */
-
-    PointToPointHelper serverLink;
-
-    serverLink.SetDeviceAttribute(
-        "DataRate",
-        StringValue("10Mbps"));
-
-    serverLink.SetChannelAttribute(
-        "Delay",
-        StringValue("2ms"));
-
-    /*
-     * Install source links.
-     */
-
-    for (uint32_t i = 0;
-         i < m_numberOfSources;
-         ++i)
-    {
-        NetDeviceContainer devices =
-            sourceLink.Install(
-                m_sourceNodes.Get(i),
-                m_routerNodes.Get(0));
-
-        m_sourceDevices.Add(
-            devices);
-    }
-
-    /*
-     * Bottleneck.
-     */
-
-    m_bottleneckDevices =
-        bottleneckLink.Install(
-            m_routerNodes.Get(0),
-            m_routerNodes.Get(1));
-
-    /*
-     * Server link.
-     */
-
-    m_serverDevices =
-        serverLink.Install(
-            m_routerNodes.Get(1),
-            m_serverNode.Get(0));
+    m_bottleneck2Devices = b2.Install(m_router2, m_server);
 }
 
-void
-NetworkScenario::InstallInternet()
+void NetworkScenario::InstallInternet()
 {
     InternetStackHelper internet;
-
-    internet.Install(
-        m_sourceNodes);
-
-    internet.Install(
-        m_routerNodes);
-
-    internet.Install(
-        m_serverNode);
+    internet.Install(m_sourceNodes);
+    internet.Install(m_router1);
+    internet.Install(m_router2);
+    internet.Install(m_server);
 }
 
-void
-NetworkScenario::AssignAddresses()
+void NetworkScenario::AssignAddresses()
 {
     Ipv4AddressHelper address;
-
-    /*
-     * Each IoT source gets its own subnet.
-     */
-
-    uint32_t deviceIndex = 0;
-
-    for (uint32_t i = 0;
-         i < m_numberOfSources;
-         ++i)
+    for (uint32_t i = 0; i < m_accessDevices.size(); ++i)
     {
-        std::ostringstream subnet;
-
-        subnet
-            << "10.1."
-            << i + 1
-            << ".0";
-
-        address.SetBase(
-            Ipv4Address(
-                subnet.str().c_str()),
-            Ipv4Mask("255.255.255.0"));
-
-        NetDeviceContainer pair;
-
-        pair.Add(
-            m_sourceDevices.Get(deviceIndex));
-
-        pair.Add(
-            m_sourceDevices.Get(deviceIndex + 1));
-
-        Ipv4InterfaceContainer interfaces =
-            address.Assign(pair);
-
-        m_sourceInterfaces.push_back(
-            interfaces);
-
-        deviceIndex += 2;
+        address.SetBase(("10." + std::to_string((i / 250) + 1) + "." + std::to_string((i % 250) + 1) + ".0").c_str(), "255.255.255.0");
+        m_accessInterfaces.push_back(address.Assign(m_accessDevices[i]));
     }
 
-    /*
-     * Bottleneck subnet.
-     */
-
-    address.SetBase(
-        "10.100.0.0",
-        "255.255.255.0");
-
-    m_bottleneckInterfaces =
-        address.Assign(
-            m_bottleneckDevices);
-
-    /*
-     * Server subnet.
-     */
-
-    address.SetBase(
-        "10.200.0.0",
-        "255.255.255.0");
-
-    m_serverInterfaces =
-        address.Assign(
-            m_serverDevices);
-
-    /*
-     * Server address.
-     *
-     * Router1 = 10.200.0.1
-     * Server  = 10.200.0.2
-     */
-
-    m_serverAddress =
-        m_serverInterfaces.GetAddress(1);
-
-    /*
-     * Enable routing.
-     */
-
+    address.SetBase("172.16.0.0", "255.255.255.0");
+    m_bottleneck1Interfaces = address.Assign(m_bottleneck1Devices);
+    address.SetBase("172.17.0.0", "255.255.255.0");
+    m_bottleneck2Interfaces = address.Assign(m_bottleneck2Devices);
+    m_serverAddress = m_bottleneck2Interfaces.GetAddress(1);
     Ipv4GlobalRoutingHelper::PopulateRoutingTables();
 }
 
-NodeContainer
-NetworkScenario::GetSourceNodes() const
-{
-    return m_sourceNodes;
-}
-
-Ptr<Node>
-NetworkScenario::GetServerNode() const
-{
-    return m_serverNode.Get(0);
-}
-
-Ipv4Address
-NetworkScenario::GetServerAddress() const
-{
-    return m_serverAddress;
-}
+NodeContainer NetworkScenario::GetSourceNodes() const { return m_sourceNodes; }
+Ptr<Node> NetworkScenario::GetServerNode() const { return m_server; }
+Ipv4Address NetworkScenario::GetServerAddress() const { return m_serverAddress; }

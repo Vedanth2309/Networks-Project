@@ -29,6 +29,18 @@ public:
         const std::vector<double>& demand,
         double capacity);
 
+    std::vector<double> Optimize(
+        const std::vector<double>& demand,
+        const std::vector<double>& priorities,
+        double capacity);
+
+    // Deadline-aware allocation: lower configured deadline means greater urgency.
+    std::vector<double> Optimize(
+        const std::vector<double>& demand,
+        const std::vector<double>& priorities,
+        const std::vector<double>& deadlinesMs,
+        double capacity);
+
     double GetEhoFitness() const;
     double GetPsoFitness() const;
     double GetBestFitness() const;

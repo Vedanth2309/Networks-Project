@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <random>
+#include <stdexcept>
 #include <vector>
 
 EHPSO::EHPSO(
@@ -242,5 +243,163 @@ EHPSO::GetEhoAllocation() const
 const std::vector<double>&
 EHPSO::GetFinalAllocation() const
 {
+    return m_finalAllocation;
+}
+
+// Priority-aware overload retained for existing callers. If no per-device
+// deadlines are supplied, use a common deadline so priority remains decisive.
+std::vector<double>
+EHPSO::Optimize(const std::vector<double>& demand,
+                const std::vector<double>& priorities,
+                double capacity)
+{
+    return Optimize(demand, priorities,
+                   std::vector<double>(demand.size(), 1000.0), capacity);
+}
+
+// Deadline-aware EHPSO allocation.
+// EHO+PSO first computes a candidate. The final feasibility stage then allocates
+// bandwidth in deadline tiers: the shortest-deadline tier is served first,
+// and a less urgent tier receives capacity only after the earlier tier's demand
+// has been satisfied. Within a tier, priority and the EHPSO candidate influence
+// weighted max-min sharing. This prevents long-deadline traffic from consuming
+// capacity while urgent traffic remains unsatisfied.
+std::vector<double>
+EHPSO::Optimize(const std::vector<double>& demand,
+                const std::vector<double>& priorities,
+                const std::vector<double>& deadlinesMs,
+                double capacity)
+{
+    if (demand.size() != priorities.size() || demand.size() != deadlinesMs.size())
+        throw std::invalid_argument("Demand, priorities and deadlines must have equal sizes.");
+    if (!std::isfinite(capacity) || capacity < 0.0)
+        throw std::invalid_argument("Capacity must be finite and non-negative.");
+
+    double totalDemand = 0.0;
+    for (size_t i = 0; i < demand.size(); ++i)
+    {
+        if (!std::isfinite(demand[i]) || demand[i] < 0.0)
+            throw std::invalid_argument("Demand must be finite and non-negative.");
+        if (!std::isfinite(priorities[i]) || priorities[i] <= 0.0)
+            throw std::invalid_argument("Priorities must be finite and positive.");
+        if (!std::isfinite(deadlinesMs[i]) || deadlinesMs[i] <= 0.0)
+            throw std::invalid_argument("Deadlines must be finite and positive.");
+        totalDemand += demand[i];
+    }
+
+    if (demand.empty())
+    {
+        m_ehoAllocation.clear();
+        m_finalAllocation.clear();
+        m_ehoFitness = m_psoFitness = m_bestFitness = 0.0;
+        return {};
+    }
+
+    if (totalDemand <= capacity)
+    {
+        m_ehoAllocation = demand;
+        m_finalAllocation = demand;
+        m_ehoFitness = m_psoFitness = m_bestFitness = 0.0;
+        return demand;
+    }
+
+    // Keep the genuine EHPSO search in the loop. Its candidate affects sharing
+    // among devices in the same deadline tier, but cannot let lower-urgency
+    // traffic jump ahead of unsatisfied tighter-deadline traffic.
+    const std::vector<double> optimizerAllocation = Optimize(demand, capacity);
+
+    std::vector<double> weights(demand.size(), 0.0);
+    for (size_t i = 0; i < demand.size(); ++i)
+    {
+        const double candidateRatio = demand[i] > 1e-12
+            ? std::clamp(optimizerAllocation[i] / demand[i], 0.0, 1.0)
+            : 0.0;
+        weights[i] = priorities[i] * (1.0 + 0.5 * candidateRatio);
+    }
+
+    std::vector<size_t> order(demand.size());
+    for (size_t i = 0; i < order.size(); ++i) order[i] = i;
+    std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+        if (deadlinesMs[a] != deadlinesMs[b]) return deadlinesMs[a] < deadlinesMs[b];
+        if (priorities[a] != priorities[b]) return priorities[a] > priorities[b];
+        return a < b;
+    });
+
+    std::vector<double> result(demand.size(), 0.0);
+    double remaining = capacity;
+    size_t begin = 0;
+    constexpr double kEpsilon = 1e-9;
+
+    while (begin < order.size() && remaining > kEpsilon)
+    {
+        // Treat equal configured deadlines as one urgency tier.
+        size_t end = begin + 1;
+        while (end < order.size() &&
+               std::abs(deadlinesMs[order[end]] - deadlinesMs[order[begin]]) <= 1e-6)
+            ++end;
+
+        double tierDemand = 0.0;
+        for (size_t pos = begin; pos < end; ++pos)
+            tierDemand += demand[order[pos]];
+
+        if (tierDemand <= remaining + kEpsilon)
+        {
+            for (size_t pos = begin; pos < end; ++pos)
+                result[order[pos]] = demand[order[pos]];
+            remaining = std::max(0.0, remaining - tierDemand);
+            begin = end;
+            continue;
+        }
+
+        // This tier cannot be fully served. Weighted max-min allocation within
+        // this tier uses all remaining capacity, subject to each demand cap.
+        std::vector<bool> active(demand.size(), false);
+        for (size_t pos = begin; pos < end; ++pos)
+            active[order[pos]] = demand[order[pos]] > 0.0;
+
+        double tierRemaining = remaining;
+        for (size_t iteration = 0; iteration <= end - begin && tierRemaining > kEpsilon; ++iteration)
+        {
+            double totalWeight = 0.0;
+            for (size_t pos = begin; pos < end; ++pos)
+            {
+                const size_t i = order[pos];
+                if (active[i] && result[i] + kEpsilon < demand[i]) totalWeight += weights[i];
+                else active[i] = false;
+            }
+            if (totalWeight <= kEpsilon) break;
+
+            double used = 0.0;
+            for (size_t pos = begin; pos < end; ++pos)
+            {
+                const size_t i = order[pos];
+                if (!active[i]) continue;
+                const double unmet = demand[i] - result[i];
+                const double grant = std::min(unmet, tierRemaining * weights[i] / totalWeight);
+                result[i] += grant;
+                used += grant;
+                if (result[i] + kEpsilon >= demand[i]) active[i] = false;
+            }
+            if (used <= kEpsilon) break;
+            tierRemaining = std::max(0.0, tierRemaining - used);
+        }
+        remaining = tierRemaining;
+        // Capacity was insufficient for this tier: no less-urgent tier gets any.
+        break;
+    }
+
+    double allocatedTotal = 0.0;
+    for (size_t i = 0; i < result.size(); ++i)
+    {
+        result[i] = std::clamp(result[i], 0.0, demand[i]);
+        allocatedTotal += result[i];
+    }
+    if (allocatedTotal > capacity + kEpsilon && allocatedTotal > 0.0)
+    {
+        const double scale = capacity / allocatedTotal;
+        for (double& value : result) value *= scale;
+    }
+
+    m_finalAllocation = result;
     return m_finalAllocation;
 }

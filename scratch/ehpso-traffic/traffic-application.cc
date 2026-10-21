@@ -31,7 +31,9 @@ TrafficApplication::TrafficApplication()
       m_destination(),
       m_port(9000),
       m_running(false),
-      m_packetsSent(0)
+      m_packetsSent(0),
+      m_deviceIndex(0),
+      m_maxDelayNs(250000000ULL)
 {
 }
 
@@ -40,7 +42,9 @@ TrafficApplication::Setup(
     double rateMbps,
     uint32_t packetSize,
     Ipv4Address destination,
-    uint16_t port)
+    uint16_t port,
+    uint32_t deviceIndex,
+    double maxDelayMs)
 {
     m_demandMbps =
         std::max(0.0, rateMbps);
@@ -56,6 +60,11 @@ TrafficApplication::Setup(
 
     m_port =
         port;
+
+    m_deviceIndex = deviceIndex;
+
+    m_maxDelayNs = static_cast<uint64_t>(
+        std::max(0.0, maxDelayMs) * 1000000.0);
 }
 
 void
@@ -78,11 +87,21 @@ TrafficApplication::SetDemand(
 }
 
 void
-TrafficApplication::SetAllocatedRate(
-    double allocatedRateMbps)
+TrafficApplication::SetAllocatedRate(double allocatedRateMbps)
 {
-    m_allocatedRateMbps =
-        std::max(0.0, allocatedRateMbps);
+    m_allocatedRateMbps = std::max(0.0, allocatedRateMbps);
+
+    // Apply rate changes immediately instead of leaving a
+    // pending packet scheduled using the previous rate.
+    if (m_running)
+    {
+        if (m_sendEvent.IsPending())
+        {
+            Simulator::Cancel(m_sendEvent);
+        }
+
+        ScheduleNextPacket();
+    }
 }
 
 double
@@ -169,9 +188,15 @@ TrafficApplication::SendPacket()
         return;
     }
 
-    Ptr<Packet> packet =
-        Create<Packet>(
-            m_packetSize);
+    Ptr<Packet> packet = Create<Packet>(m_packetSize);
+
+    TrafficPacketTag tag(
+        m_deviceIndex,
+        static_cast<uint64_t>(
+            Simulator::Now().GetNanoSeconds()),
+        m_maxDelayNs);
+
+    packet->AddPacketTag(tag);
 
     int result =
         m_socket->Send(packet);
@@ -192,8 +217,7 @@ TrafficApplication::ScheduleNextPacket()
         return;
     }
 
-    double effectiveRate =
-        GetEffectiveRate();
+    const double effectiveRate = GetEffectiveRate();
 
     double interval;
 
@@ -203,12 +227,16 @@ TrafficApplication::ScheduleNextPacket()
     }
     else
     {
+        // Approximate IPv4 (20 bytes), UDP (8 bytes), and
+        // point-to-point framing (2 bytes) overhead.
+        constexpr double wireOverheadBytes = 30.0;
+
+        const double wirePacketBytes =
+            static_cast<double>(m_packetSize) + wireOverheadBytes;
+
         interval =
-            (static_cast<double>(
-                 m_packetSize) *
-             8.0) /
-            (effectiveRate *
-             1000000.0);
+            (wirePacketBytes * 8.0) /
+            (effectiveRate * 1000000.0);
 
         if (interval < 0.000001)
         {
@@ -216,9 +244,8 @@ TrafficApplication::ScheduleNextPacket()
         }
     }
 
-    m_sendEvent =
-        Simulator::Schedule(
-            Seconds(interval),
-            &TrafficApplication::SendPacket,
-            this);
+    m_sendEvent = Simulator::Schedule(
+        Seconds(interval),
+        &TrafficApplication::SendPacket,
+        this);
 }

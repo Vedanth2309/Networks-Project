@@ -6,6 +6,7 @@
 #include "ns3/ipv4-address.h"
 #include "ns3/ptr.h"
 #include "ns3/socket.h"
+#include "traffic-packet-tag.h"
 
 #include <cstdint>
 
@@ -20,7 +21,9 @@ public:
         double rateMbps,
         uint32_t packetSize,
         ns3::Ipv4Address destination,
-        uint16_t port);
+        uint16_t port,
+        uint32_t deviceIndex,
+        double maxDelayMs);
 
     void SetDemand(double demandMbps);
 
@@ -60,6 +63,9 @@ private:
     bool m_running;
 
     uint64_t m_packetsSent;
+
+    uint32_t m_deviceIndex;
+    uint64_t m_maxDelayNs;
 };
 
 #endif

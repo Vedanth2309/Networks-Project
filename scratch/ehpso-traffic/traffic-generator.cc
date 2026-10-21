@@ -4,122 +4,82 @@
 #include <iomanip>
 #include <iostream>
 #include <random>
-#include <vector>
+#include <stdexcept>
 
 TrafficGenerator::TrafficGenerator(
-    uint32_t numberOfSources,
-    uint32_t packetSize,
-    double minDemand,
-    double maxDemand,
+    const std::vector<HospitalDeviceConfig>& devices,
     double simulationTime,
     double profileInterval,
     uint32_t seed)
-    : m_numberOfSources(numberOfSources),
-      m_packetSize(packetSize),
-      m_minDemand(minDemand),
-      m_maxDemand(maxDemand),
+    : m_devices(devices),
       m_simulationTime(simulationTime),
       m_profileInterval(profileInterval),
       m_seed(seed)
 {
+    if (simulationTime <= 0.0 || profileInterval <= 0.0)
+    {
+        throw std::invalid_argument(
+            "Simulation time and profile interval must be positive.");
+    }
 }
 
 std::vector<TrafficGenerator::TrafficSource>
 TrafficGenerator::GenerateTraffic()
 {
     std::mt19937 generator(m_seed);
-
-    std::uniform_real_distribution<double>
-        baseDistribution(
-            m_minDemand,
-            m_maxDemand);
-
-    std::uniform_real_distribution<double>
-        variationDistribution(
-            0.75,
-            1.25);
-
-    std::uniform_real_distribution<double>
-        eventDistribution(
-            0.0,
-            1.0);
+    std::uniform_real_distribution<double> random01(0.0, 1.0);
 
     std::vector<TrafficSource> traffic;
+    traffic.reserve(m_devices.size());
 
-    for (uint32_t i = 0;
-         i < m_numberOfSources;
-         ++i)
+    for (std::size_t i = 0; i < m_devices.size(); ++i)
     {
-        TrafficSource source;
+        const HospitalDeviceConfig& device = m_devices[i];
 
-        source.id = i + 1;
+        if (device.meanDemandMbps < 0.0 ||
+            device.peakDemandMbps < device.meanDemandMbps)
+        {
+            throw std::invalid_argument(
+                "Invalid mean/peak demand for device: " + device.deviceId);
+        }
 
-        source.packetSize =
-            m_packetSize;
+        TrafficSource source{};
+        source.id = static_cast<uint32_t>(i + 1);
+        source.deviceId = device.deviceId;
+        source.category = device.category;
+        source.priority = device.priority;
+        source.packetSize = device.packetSizeBytes;
+        source.startTime = device.startTimeSeconds;
+        source.stopTime = std::min(
+            device.stopTimeSeconds, m_simulationTime);
+        source.maxDelayMs = device.maxDelayMs;
 
-        source.startTime =
-            1.0 + (0.05 * i);
+        const double mean = device.meanDemandMbps;
+        const double peak = device.peakDemandMbps;
 
-        source.stopTime =
-            m_simulationTime - 0.1;
-
-        double baseDemand =
-            baseDistribution(generator);
-
-        for (double time = 1.0;
-             time < m_simulationTime;
+        for (double time = source.startTime;
+             time < source.stopTime;
              time += m_profileInterval)
         {
-            double demand =
-                baseDemand;
+            double demand = mean + random01(generator) * (peak - mean);
 
-            double event =
-                eventDistribution(generator);
-
-            /*
-             * 15% chance of burst.
-             */
-            if (event < 0.15)
+            // Simulate occasional high-demand hospital traffic bursts.
+            if (random01(generator) < 0.15)
             {
-                demand =
-                    std::min(
-                        m_maxDemand,
-                        baseDemand * 1.8);
+                demand = peak;
             }
 
-            /*
-             * Next 10% chance of low traffic.
-             */
-            else if (event < 0.25)
-            {
-                demand =
-                    std::max(
-                        m_minDemand,
-                        baseDemand * 0.45);
-            }
-
-            /*
-             * Normal variation.
-             */
-            else
-            {
-                demand =
-                    baseDemand *
-                    variationDistribution(generator);
-
-                demand =
-                    std::max(
-                        m_minDemand,
-                        std::min(
-                            m_maxDemand,
-                            demand));
-            }
-
-            TrafficPoint point;
-
+            TrafficPoint point{};
             point.time = time;
             point.demandMbps = demand;
+            source.profile.push_back(point);
+        }
 
+        if (source.profile.empty())
+        {
+            TrafficPoint point{};
+            point.time = source.startTime;
+            point.demandMbps = mean;
             source.profile.push_back(point);
         }
 
@@ -129,38 +89,27 @@ TrafficGenerator::GenerateTraffic()
     return traffic;
 }
 
-void
-TrafficGenerator::PrintTraffic(
+void TrafficGenerator::PrintTraffic(
     const std::vector<TrafficSource>& traffic) const
 {
-    std::cout
-        << "\nDynamic traffic profile\n"
-        << "-----------------------\n";
-
-    std::cout
-        << std::fixed
-        << std::setprecision(3);
+    std::cout << "\nHospital traffic profiles\n"
+              << "-------------------------\n"
+              << std::fixed << std::setprecision(3);
 
     for (const auto& source : traffic)
     {
-        if (source.profile.empty())
+        std::cout << source.deviceId
+                  << " | Category: " << source.category
+                  << " | Priority: " << source.priority
+                  << " | Packets: " << source.packetSize << " bytes";
+
+        if (!source.profile.empty())
         {
-            continue;
+            std::cout << " | Initial demand: "
+                      << source.profile.front().demandMbps
+                      << " Mbps";
         }
 
-        const auto& first =
-            source.profile.front();
-
-        const auto& last =
-            source.profile.back();
-
-        std::cout
-            << "IoT "
-            << source.id
-            << " : "
-            << first.demandMbps
-            << " Mbps -> "
-            << last.demandMbps
-            << " Mbps\n";
+        std::cout << '\n';
     }
 }
